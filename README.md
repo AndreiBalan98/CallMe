@@ -6,9 +6,10 @@ Backend FastAPI pentru asistent vocal cu Twilio și OpenAI.
 
 ```bash
 python -m venv venv
-source venv/bin/activate
+venv\Scripts\activate
 pip install -r requirements.txt
-OPENAI_API_KEY="sk-your-key" uvicorn main:app --reload --port 8000
+$env:OPENAI_API_KEY="sk-your-key"
+uvicorn main:app --reload --port 8000
 ```
 
 ## ngrok
