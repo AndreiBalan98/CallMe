@@ -22,8 +22,8 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 app = FastAPI()
 client = OpenAI()
 
-# Directory for audio files
-AUDIO_DIR = "/tmp/audio"
+# Directory for audio files (works on Render)
+AUDIO_DIR = os.path.join(os.path.dirname(__file__), "audio_cache")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
 # In-memory conversation storage per call
