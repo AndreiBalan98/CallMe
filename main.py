@@ -31,7 +31,7 @@ def get_llm_response(call_sid: str, user_message: str) -> str:
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
-        max_tokens=150,
+        max_tokens=5000,
         temperature=0.7
     )
     
