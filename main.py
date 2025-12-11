@@ -215,13 +215,17 @@ async def send_initial_greeting(openai_ws):
         }
     }
     await openai_ws.send(json.dumps(greeting_event))
+    logger.info("📤 Trimis conversation.item.create pentru salut")
     
-    # Solicită răspuns
+    # Solicită răspuns CU AUDIO EXPLICIT
     response_event = {
-        "type": "response.create"
+        "type": "response.create",
+        "response": {
+            "modalities": ["text", "audio"]
+        }
     }
     await openai_ws.send(json.dumps(response_event))
-    logger.info("👋 Salut inițial solicitat")
+    logger.info("👋 Salut inițial solicitat cu modalities: text, audio")
 
 
 async def handle_twilio_messages(twilio_ws, openai_ws, get_stream_sid, set_stream_sid):
@@ -300,9 +304,11 @@ async def handle_openai_messages(openai_ws, twilio_ws, get_stream_sid):
                 elif event_type == "session.updated":
                     session = data.get('session', {})
                     logger.info(f"✅ Sesiune actualizată:")
+                    logger.info(f"   - modalities: {session.get('modalities')}")
                     logger.info(f"   - input_audio_format: {session.get('input_audio_format')}")
                     logger.info(f"   - output_audio_format: {session.get('output_audio_format')}")
                     logger.info(f"   - voice: {session.get('voice')}")
+                    logger.info(f"   - turn_detection: {session.get('turn_detection', {}).get('type')}")
                 elif event_type == "input_audio_buffer.speech_started":
                     logger.info("🎤 Utilizator vorbește...")
                 elif event_type == "input_audio_buffer.speech_stopped":
@@ -310,7 +316,16 @@ async def handle_openai_messages(openai_ws, twilio_ws, get_stream_sid):
                 elif event_type == "response.created":
                     logger.info("🤖 Generare răspuns început...")
                 elif event_type == "response.done":
+                    response_data = data.get('response', {})
+                    output = response_data.get('output', [])
                     logger.info(f"✅ Răspuns complet - audio chunks trimise: {audio_chunks_received}")
+                    logger.info(f"   Response status: {response_data.get('status')}")
+                    logger.info(f"   Output items: {len(output)}")
+                    for i, item in enumerate(output):
+                        logger.info(f"   Item {i}: type={item.get('type')}, role={item.get('role')}")
+                        if item.get('content'):
+                            for c in item.get('content', []):
+                                logger.info(f"      Content: type={c.get('type')}, transcript={c.get('transcript', '')[:50] if c.get('transcript') else 'N/A'}")
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = data.get('transcript', '')
                     logger.info(f"📝 Transcriere: {transcript[:100]}")
