@@ -30,8 +30,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PORT = int(os.getenv("PORT", 5050))
 
 # OpenAI Realtime API settings
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
-VOICE = "shimmer"  # Voce feminină, caldă - alternativ: alloy, echo, fable, onyx, nova
+# Modele disponibile:
+# - gpt-4o-realtime-preview (ultima versiune preview)
+# - gpt-realtime (GA - general availability, recomandat pentru producție)
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+VOICE = "shimmer"  # Voci: alloy, ash, ballad, coral, echo, sage, shimmer, verse
 
 # System prompt pentru asistentul vocal
 SYSTEM_PROMPT = """Ești un asistent vocal prietenos care vorbește în limba română.
@@ -318,8 +321,16 @@ async def handle_openai_messages(openai_ws, twilio_ws, get_stream_sid):
                 elif event_type == "response.done":
                     response_data = data.get('response', {})
                     output = response_data.get('output', [])
+                    status = response_data.get('status')
                     logger.info(f"✅ Răspuns complet - audio chunks trimise: {audio_chunks_received}")
-                    logger.info(f"   Response status: {response_data.get('status')}")
+                    logger.info(f"   Response status: {status}")
+                    
+                    # Dacă a eșuat, afișează motivul
+                    if status == 'failed':
+                        status_details = response_data.get('status_details', {})
+                        logger.error(f"   ❌ FAILED REASON: {status_details}")
+                        logger.error(f"   Full response: {json.dumps(response_data, indent=2)[:1000]}")
+                    
                     logger.info(f"   Output items: {len(output)}")
                     for i, item in enumerate(output):
                         logger.info(f"   Item {i}: type={item.get('type')}, role={item.get('role')}")
