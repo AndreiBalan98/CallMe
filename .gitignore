@@ -2,9 +2,6 @@
 venv/
 .venv/
 
-# Audio cache (generated at runtime)
-audio_cache/
-
 # Environment variables
 .env
 
@@ -13,13 +10,34 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*.sublime-workspace
+*.sublime-project
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log

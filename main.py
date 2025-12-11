@@ -1,315 +1,299 @@
-from fastapi import FastAPI, Form, Response, Request
-from fastapi.responses import FileResponse
-from openai import OpenAI
-import logging
-import os
-import hashlib
-import time
-from datetime import datetime
+"""
+CallMe - Voice Assistant cu OpenAI Realtime API + Twilio Media Streams
+Comunicare bidirecțională în timp real prin WebSockets
+"""
 
-# Enhanced logging setup
+import os
+import json
+import base64
+import asyncio
+import logging
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.responses import HTMLResponse
+from fastapi.websockets import WebSocketDisconnect
+import websockets
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s │ %(message)s',
+    format='%(asctime)s │ %(levelname)s │ %(message)s',
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("websockets").setLevel(logging.WARNING)
 
-# Disable noisy loggers
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+# Configuration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+PORT = int(os.getenv("PORT", 5050))
+
+# OpenAI Realtime API settings
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+VOICE = "shimmer"  # Voce feminină, caldă - alternativ: alloy, echo, fable, onyx, nova
+
+# System prompt pentru asistentul vocal
+SYSTEM_PROMPT = """Ești un asistent vocal prietenos care vorbește în limba română.
+
+Reguli importante:
+- Răspunde SCURT și NATURAL, ca într-o conversație telefonică normală
+- Evită răspunsurile lungi - maxim 2-3 propoziții
+- Fii cald și prietenos, dar concis
+- Nu repeta informații deja spuse
+- Când utilizatorul vrea să încheie (spune "pa", "la revedere", "gata", etc.), răspunde scurt cu un salut și conversația se va încheia automat
+- Nu menționa că ești o inteligență artificială decât dacă ești întrebat direct"""
+
+# Mesaje audio de început (vor fi generate și trimise la începutul apelului)
+GREETING_MESSAGES = [
+    "Bună! Cu ce te pot ajuta?",
+]
+
+# Evenimente OpenAI pe care le logăm
+LOG_EVENT_TYPES = [
+    'error',
+    'response.done',
+    'input_audio_buffer.speech_started',
+    'input_audio_buffer.speech_stopped',
+    'conversation.item.created',
+    'response.audio.done',
+]
 
 app = FastAPI()
-client = OpenAI()
 
-# Directory for audio files (works on Render)
-AUDIO_DIR = os.path.join(os.path.dirname(__file__), "audio_cache")
-os.makedirs(AUDIO_DIR, exist_ok=True)
-
-# In-memory conversation storage per call
-conversations: dict[str, list[dict]] = {}
-
-# Call metadata for timing
-call_metadata: dict[str, dict] = {}
-
-SYSTEM_PROMPT = """Ești un asistent vocal prietenos care vorbește în română.
-Răspunde concis și natural, ca într-o conversație telefonică.
-La finalul fiecărui răspuns în care ai rezolvat cererea utilizatorului, întreabă politicos dacă mai poți ajuta cu ceva sau dacă e ok să închizi.
-Când utilizatorul confirmă că poate închide (ex: "da", "ok", "gata", "pa", "la revedere"), răspunde cu exact: "ÎNCHIDE_APEL" la început, urmat de un mesaj scurt de rămas bun."""
-
-# TTS Settings
-TTS_MODEL = "tts-1"
-TTS_VOICE = "nova"  # Feminine, warm voice
-LANGUAGE = "ro-RO"
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY lipsește din .env")
 
 
-def log_separator(call_sid: str, char: str = "─", length: int = 60):
-    """Print a visual separator."""
-    logger.info(f"[{call_sid[:8]}] {char * length}")
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Health check endpoint"""
+    return HTMLResponse(content="<h1>CallMe Voice Assistant - Running</h1>")
 
 
-def log_header(call_sid: str, title: str):
-    """Print a section header."""
-    logger.info(f"[{call_sid[:8]}] ┌{'─' * 58}┐")
-    logger.info(f"[{call_sid[:8]}] │ {title:^56} │")
-    logger.info(f"[{call_sid[:8]}] └{'─' * 58}┘")
-
-
-def generate_audio(text: str, call_sid: str) -> tuple[str, float]:
-    """Generate audio file using OpenAI TTS and return filename and duration."""
-    start_time = time.time()
+@app.api_route("/incoming-call", methods=["GET", "POST"])
+async def incoming_call(request: Request):
+    """
+    Webhook Twilio pentru apeluri primite.
+    Returnează TwiML care conectează apelul la WebSocket-ul nostru pentru Media Streams.
+    """
+    host = request.url.hostname
+    port_suffix = f":{request.url.port}" if request.url.port and request.url.port not in (80, 443) else ""
     
-    # Create unique filename based on call_sid and text hash
-    text_hash = hashlib.md5(text.encode()).hexdigest()[:8]
-    filename = f"{call_sid}_{text_hash}.mp3"
-    filepath = os.path.join(AUDIO_DIR, filename)
+    # TwiML: conectează direct la WebSocket, fără mesaj Say
+    # (vom trimite audio-ul de salut prin stream)
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="wss://{host}{port_suffix}/media-stream" />
+    </Connect>
+</Response>"""
     
-    # Generate audio
-    response = client.audio.speech.create(
-        model=TTS_MODEL,
-        voice=TTS_VOICE,
-        input=text,
-        response_format="mp3"
-    )
-    
-    # Save to file
-    response.stream_to_file(filepath)
-    
-    elapsed = time.time() - start_time
-    file_size = os.path.getsize(filepath) / 1024  # KB
-    
-    logger.info(f"[{call_sid[:8]}] 🔊 TTS: {elapsed:.2f}s │ {file_size:.1f}KB │ {len(text)} chars")
-    logger.info(f"[{call_sid[:8]}]    Text: \"{text[:80]}{'...' if len(text) > 80 else ''}\"")
-    
-    return filename, elapsed
+    logger.info(f"📞 Apel primit - conectare la wss://{host}{port_suffix}/media-stream")
+    return HTMLResponse(content=twiml, media_type="application/xml")
 
 
-def get_llm_response(call_sid: str, user_message: str) -> tuple[str, float]:
-    """Get LLM response and return it with timing."""
-    start_time = time.time()
+@app.websocket("/media-stream")
+async def media_stream(websocket: WebSocket):
+    """
+    WebSocket endpoint pentru Twilio Media Streams.
+    Face proxy bidirecțional între Twilio și OpenAI Realtime API.
+    """
+    await websocket.accept()
+    logger.info("🔌 Twilio WebSocket conectat")
     
-    if call_sid not in conversations:
-        conversations[call_sid] = []
+    stream_sid = None
+    openai_ws = None
     
-    conversations[call_sid].append({"role": "user", "content": user_message})
-    
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversations[call_sid]
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        max_tokens=5000,
-        temperature=0.7
-    )
-    
-    assistant_message = response.choices[0].message.content
-    conversations[call_sid].append({"role": "assistant", "content": assistant_message})
-    
-    elapsed = time.time() - start_time
-    tokens_in = response.usage.prompt_tokens
-    tokens_out = response.usage.completion_tokens
-    
-    logger.info(f"[{call_sid[:8]}] 🤖 LLM: {elapsed:.2f}s │ tokens: {tokens_in}→{tokens_out}")
-    
-    return assistant_message, elapsed
-
-
-def twiml_response(content: str) -> Response:
-    return Response(content=content, media_type="application/xml")
-
-
-def cleanup_audio(call_sid: str):
-    """Remove all audio files for a call."""
-    count = 0
-    for filename in os.listdir(AUDIO_DIR):
-        if filename.startswith(call_sid):
-            try:
-                os.remove(os.path.join(AUDIO_DIR, filename))
-                count += 1
-            except Exception as e:
-                logger.error(f"[{call_sid[:8]}] ❌ Failed to clean {filename}: {e}")
-    if count > 0:
-        logger.info(f"[{call_sid[:8]}] 🧹 Cleaned up {count} audio files")
-
-
-def get_call_duration(call_sid: str) -> str:
-    """Get formatted call duration."""
-    if call_sid in call_metadata and "start_time" in call_metadata[call_sid]:
-        duration = time.time() - call_metadata[call_sid]["start_time"]
-        minutes = int(duration // 60)
-        seconds = int(duration % 60)
-        return f"{minutes}:{seconds:02d}"
-    return "0:00"
-
-
-@app.get("/audio/{filename}")
-async def serve_audio(filename: str):
-    """Serve generated audio files."""
-    filepath = os.path.join(AUDIO_DIR, filename)
-    if os.path.exists(filepath):
-        # Extract call_sid from filename
-        call_sid = filename.split("_")[0] if "_" in filename else "unknown"
-        logger.info(f"[{call_sid[:8]}] 📤 Serving audio: {filename}")
-        return FileResponse(filepath, media_type="audio/mpeg")
-    logger.warning(f"[????????] ⚠️  Audio not found: {filename}")
-    return Response(status_code=404)
-
-
-@app.post("/voice")
-async def voice_webhook(
-    CallSid: str = Form(...),
-    SpeechResult: str = Form(None),
-    Digits: str = Form(None),
-    From: str = Form(None),
-    To: str = Form(None),
-    Confidence: float = Form(None),
-):
-    total_start = time.time()
-    sid = CallSid[:8]  # Short version for logs
-    
-    # First call - no input yet
-    if not SpeechResult:
-        log_header(CallSid, "📞 NEW CALL")
-        logger.info(f"[{sid}] From: {From} → To: {To}")
-        logger.info(f"[{sid}] CallSid: {CallSid}")
+    try:
+        # Variabilă pentru stream_sid (closure workaround)
+        def set_stream_sid(sid):
+            nonlocal stream_sid
+            stream_sid = sid
         
-        # Initialize call metadata
-        call_metadata[CallSid] = {
-            "start_time": time.time(),
-            "from": From,
-            "turns": 0,
-            "total_llm_time": 0,
-            "total_tts_time": 0,
+        # Conectare la OpenAI Realtime API
+        openai_ws = await websockets.connect(
+            OPENAI_REALTIME_URL,
+            extra_headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "OpenAI-Beta": "realtime=v1"
+            }
+        )
+        logger.info("🤖 Conectat la OpenAI Realtime API")
+        
+        # Configurare sesiune OpenAI
+        await send_session_config(openai_ws)
+        
+        # Pornește task-uri paralele pentru comunicare bidirecțională
+        receive_from_twilio = asyncio.create_task(
+            handle_twilio_messages(websocket, openai_ws, lambda: stream_sid, set_stream_sid)
+        )
+        receive_from_openai = asyncio.create_task(
+            handle_openai_messages(openai_ws, websocket, lambda: stream_sid)
+        )
+        
+        # Așteaptă până când unul dintre task-uri se termină
+        done, pending = await asyncio.wait(
+            [receive_from_twilio, receive_from_openai],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # Anulează task-urile rămase
+        for task in pending:
+            task.cancel()
+            
+    except WebSocketDisconnect:
+        logger.info("📴 Twilio WebSocket deconectat")
+    except Exception as e:
+        logger.error(f"❌ Eroare: {e}")
+    finally:
+        if openai_ws:
+            await openai_ws.close()
+            logger.info("🔌 OpenAI WebSocket închis")
+
+
+async def send_session_config(openai_ws):
+    """Trimite configurația sesiunii la OpenAI"""
+    session_config = {
+        "type": "session.update",
+        "session": {
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 500
+            },
+            "input_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw",
+            "voice": VOICE,
+            "instructions": SYSTEM_PROMPT,
+            "modalities": ["text", "audio"],
+            "temperature": 0.8,
         }
-        
-        # Generate greeting audio
-        greeting_text = "Salut, cu ce te pot ajuta?"
-        audio_filename, tts_time = generate_audio(greeting_text, CallSid)
-        call_metadata[CallSid]["total_tts_time"] += tts_time
-        
-        # Fallback text for no response
-        no_response_text = "Nu am auzit nimic. La revedere!"
-        no_response_audio, tts_time2 = generate_audio(no_response_text, CallSid)
-        call_metadata[CallSid]["total_tts_time"] += tts_time2
-        
-        total_time = time.time() - total_start
-        logger.info(f"[{sid}] ⏱️  Total response time: {total_time:.2f}s")
-        log_separator(CallSid)
-        
-        return twiml_response(f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Play>/audio/{audio_filename}</Play>
-    <Gather input="speech" language="{LANGUAGE}" speechTimeout="auto" action="/voice" method="POST">
-    </Gather>
-    <Play>/audio/{no_response_audio}</Play>
-</Response>""")
-    
-    # Continuing conversation
-    call_metadata[CallSid]["turns"] = call_metadata.get(CallSid, {}).get("turns", 0) + 1
-    turn = call_metadata[CallSid]["turns"]
-    duration = get_call_duration(CallSid)
-    
-    log_separator(CallSid, "─")
-    logger.info(f"[{sid}] 🎤 TURN {turn} │ Duration: {duration}")
-    logger.info(f"[{sid}] 👤 USER: \"{SpeechResult}\"")
-    if Confidence:
-        logger.info(f"[{sid}]    Confidence: {Confidence:.1%}")
-    
-    # Get LLM response
-    llm_response, llm_time = get_llm_response(CallSid, SpeechResult)
-    call_metadata[CallSid]["total_llm_time"] += llm_time
-    
-    # Check if call should end
-    if llm_response.startswith("ÎNCHIDE_APEL"):
-        goodbye_message = llm_response.replace("ÎNCHIDE_APEL", "").strip()
-        
-        logger.info(f"[{sid}] 🤖 ASSISTANT: \"{goodbye_message}\"")
-        
-        # Generate goodbye audio
-        audio_filename, tts_time = generate_audio(goodbye_message, CallSid)
-        call_metadata[CallSid]["total_tts_time"] += tts_time
-        
-        total_time = time.time() - total_start
-        
-        # Final stats
-        log_header(CallSid, "📴 CALL ENDING")
-        meta = call_metadata.get(CallSid, {})
-        logger.info(f"[{sid}] Duration: {duration}")
-        logger.info(f"[{sid}] Turns: {meta.get('turns', 0)}")
-        logger.info(f"[{sid}] Total LLM time: {meta.get('total_llm_time', 0):.2f}s")
-        logger.info(f"[{sid}] Total TTS time: {meta.get('total_tts_time', 0):.2f}s")
-        logger.info(f"[{sid}] ⏱️  Final response: {total_time:.2f}s")
-        log_separator(CallSid, "═")
-        
-        # Cleanup
-        conversations.pop(CallSid, None)
-        call_metadata.pop(CallSid, None)
-        
-        return twiml_response(f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Play>/audio/{audio_filename}</Play>
-    <Hangup/>
-</Response>""")
-    
-    logger.info(f"[{sid}] 🤖 ASSISTANT: \"{llm_response}\"")
-    
-    # Generate response audio
-    audio_filename, tts_time = generate_audio(llm_response, CallSid)
-    call_metadata[CallSid]["total_tts_time"] += tts_time
-    
-    # Fallback for silence
-    silence_text = "Nu am auzit nimic. Mai ești acolo?"
-    silence_audio, tts_time2 = generate_audio(silence_text, CallSid)
-    call_metadata[CallSid]["total_tts_time"] += tts_time2
-    
-    total_time = time.time() - total_start
-    logger.info(f"[{sid}] ⏱️  Total response time: {total_time:.2f}s")
-    log_separator(CallSid)
-    
-    # Continue conversation
-    return twiml_response(f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Play>/audio/{audio_filename}</Play>
-    <Gather input="speech" language="{LANGUAGE}" speechTimeout="auto" action="/voice" method="POST">
-    </Gather>
-    <Play>/audio/{silence_audio}</Play>
-    <Redirect>/voice</Redirect>
-</Response>""")
+    }
+    await openai_ws.send(json.dumps(session_config))
+    logger.info(f"⚙️ Sesiune configurată - voce: {VOICE}")
 
 
-@app.post("/status")
-async def status_callback(
-    CallSid: str = Form(...),
-    CallStatus: str = Form(...),
-    CallDuration: int = Form(None),
-):
-    sid = CallSid[:8]
+async def send_initial_greeting(openai_ws):
+    """
+    Trimite mesajul de salut inițial prin OpenAI.
+    Folosim response.create pentru a genera audio-ul de salut.
+    """
+    # Creăm un item de conversație cu salutul
+    greeting_event = {
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Salută utilizatorul scurt și întreabă cu ce îl poți ajuta."
+                }
+            ]
+        }
+    }
+    await openai_ws.send(json.dumps(greeting_event))
     
-    status_emoji = {
-        "initiated": "🔔",
-        "ringing": "🔔",
-        "in-progress": "📞",
-        "completed": "✅",
-        "failed": "❌",
-        "busy": "⛔",
-        "no-answer": "📵",
-    }.get(CallStatus, "❓")
-    
-    logger.info(f"[{sid}] {status_emoji} Status: {CallStatus}" + 
-                (f" │ Duration: {CallDuration}s" if CallDuration else ""))
-    
-    if CallStatus in ("completed", "failed", "busy", "no-answer"):
-        conversations.pop(CallSid, None)
-        call_metadata.pop(CallSid, None)
-        cleanup_audio(CallSid)
-    
-    return Response(status_code=200)
+    # Solicită răspuns
+    response_event = {
+        "type": "response.create"
+    }
+    await openai_ws.send(json.dumps(response_event))
+    logger.info("👋 Salut inițial solicitat")
 
 
-@app.on_event("startup")
-async def startup_event():
-    logger.info("═" * 60)
-    logger.info("🚀 CallMe Voice Assistant Started")
-    logger.info(f"   TTS Model: {TTS_MODEL} │ Voice: {TTS_VOICE}")
-    logger.info(f"   Language: {LANGUAGE}")
-    logger.info("═" * 60)
+async def handle_twilio_messages(twilio_ws, openai_ws, get_stream_sid, set_stream_sid):
+    """
+    Primește mesaje de la Twilio și le trimite la OpenAI.
+    """
+    greeting_sent = False
+    
+    try:
+        while True:
+            message = await twilio_ws.receive_text()
+            data = json.loads(message)
+            event_type = data.get("event")
+            
+            if event_type == "connected":
+                logger.info("📱 Twilio stream conectat")
+                
+            elif event_type == "start":
+                stream_sid = data["start"]["streamSid"]
+                set_stream_sid(stream_sid)
+                logger.info(f"🎙️ Stream început - SID: {stream_sid[:20]}...")
+                
+                # Trimite salutul inițial după ce stream-ul a pornit
+                if not greeting_sent:
+                    await send_initial_greeting(openai_ws)
+                    greeting_sent = True
+                
+            elif event_type == "media":
+                # Forward audio de la Twilio la OpenAI
+                audio_payload = data["media"]["payload"]
+                audio_event = {
+                    "type": "input_audio_buffer.append",
+                    "audio": audio_payload
+                }
+                await openai_ws.send(json.dumps(audio_event))
+                
+            elif event_type == "stop":
+                logger.info("🛑 Stream oprit de Twilio")
+                break
+                
+    except WebSocketDisconnect:
+        logger.info("📴 Twilio deconectat")
+    except Exception as e:
+        logger.error(f"❌ Eroare Twilio handler: {e}")
+
+
+async def handle_openai_messages(openai_ws, twilio_ws, get_stream_sid):
+    """
+    Primește mesaje de la OpenAI și le trimite la Twilio.
+    """
+    try:
+        async for message in openai_ws:
+            data = json.loads(message)
+            event_type = data.get("type", "")
+            
+            # Log evenimente importante
+            if event_type in LOG_EVENT_TYPES:
+                if event_type == "error":
+                    logger.error(f"❌ OpenAI Error: {data.get('error', {})}")
+                elif event_type == "input_audio_buffer.speech_started":
+                    logger.info("🎤 Utilizator vorbește...")
+                elif event_type == "input_audio_buffer.speech_stopped":
+                    logger.info("🔇 Utilizator a terminat")
+                elif event_type == "response.done":
+                    logger.info("✅ Răspuns complet")
+            
+            # Forward audio de la OpenAI la Twilio
+            if event_type == "response.audio.delta":
+                audio_payload = data.get("delta", "")
+                if audio_payload:
+                    stream_sid = get_stream_sid()
+                    if stream_sid:
+                        media_message = {
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {
+                                "payload": audio_payload
+                            }
+                        }
+                        await twilio_ws.send_json(media_message)
+                        
+    except websockets.exceptions.ConnectionClosed:
+        logger.info("🔌 OpenAI WebSocket închis")
+    except Exception as e:
+        logger.error(f"❌ Eroare OpenAI handler: {e}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    logger.info("=" * 60)
+    logger.info("🚀 CallMe Voice Assistant - OpenAI Realtime")
+    logger.info(f"   Voice: {VOICE}")
+    logger.info(f"   Port: {PORT}")
+    logger.info("=" * 60)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
