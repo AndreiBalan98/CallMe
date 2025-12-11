@@ -49,15 +49,27 @@ GREETING_MESSAGES = [
     "Bună! Cu ce te pot ajuta?",
 ]
 
-# Evenimente OpenAI pe care le logăm
+# Evenimente OpenAI pe care le logăm (TOATE pentru debugging)
 LOG_EVENT_TYPES = [
     'error',
+    'session.created',
+    'session.updated',
+    'response.created',
     'response.done',
+    'response.audio.delta',
+    'response.audio.done',
+    'response.text.delta',
+    'response.text.done',
     'input_audio_buffer.speech_started',
     'input_audio_buffer.speech_stopped',
+    'input_audio_buffer.committed',
     'conversation.item.created',
-    'response.audio.done',
+    'conversation.item.input_audio_transcription.completed',
+    'rate_limits.updated',
 ]
+
+# Flag pentru debugging - pune True pentru a vedea TOATE mesajele
+DEBUG_ALL_EVENTS = True
 
 app = FastAPI()
 
@@ -112,14 +124,21 @@ async def media_stream(websocket: WebSocket):
             stream_sid = sid
         
         # Conectare la OpenAI Realtime API
-        openai_ws = await websockets.connect(
-            OPENAI_REALTIME_URL,
-            extra_headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "OpenAI-Beta": "realtime=v1"
-            }
-        )
-        logger.info("🤖 Conectat la OpenAI Realtime API")
+        logger.info(f"🔄 Conectare la OpenAI: {OPENAI_REALTIME_URL}")
+        try:
+            openai_ws = await websockets.connect(
+                OPENAI_REALTIME_URL,
+                extra_headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "OpenAI-Beta": "realtime=v1"
+                }
+            )
+            logger.info("🤖 Conectat la OpenAI Realtime API")
+        except Exception as e:
+            logger.error(f"❌ EROARE CONEXIUNE OPENAI: {e}")
+            logger.error(f"   Verifică: 1) API key valid 2) Acces la Realtime API 3) Model disponibil")
+            await websocket.close()
+            return
         
         # Configurare sesiune OpenAI
         await send_session_config(openai_ws)
@@ -171,8 +190,9 @@ async def send_session_config(openai_ws):
             "temperature": 0.8,
         }
     }
+    logger.info(f"📤 Trimit session.update: input={session_config['session']['input_audio_format']}, output={session_config['session']['output_audio_format']}")
     await openai_ws.send(json.dumps(session_config))
-    logger.info(f"⚙️ Sesiune configurată - voce: {VOICE}")
+    logger.info(f"⚙️ Session config trimis - voce: {VOICE}")
 
 
 async def send_initial_greeting(openai_ws):
@@ -252,21 +272,48 @@ async def handle_openai_messages(openai_ws, twilio_ws, get_stream_sid):
     """
     Primește mesaje de la OpenAI și le trimite la Twilio.
     """
+    audio_chunks_received = 0
+    
     try:
         async for message in openai_ws:
             data = json.loads(message)
             event_type = data.get("type", "")
             
+            # DEBUG: Log toate evenimentele
+            if DEBUG_ALL_EVENTS:
+                if event_type == "response.audio.delta":
+                    audio_chunks_received += 1
+                    if audio_chunks_received % 50 == 1:  # Log fiecare 50 chunks
+                        logger.info(f"🔊 Audio chunks primite: {audio_chunks_received}")
+                else:
+                    # Log complet pentru non-audio events
+                    logger.info(f"📨 OpenAI Event: {event_type}")
+                    if event_type in ['error', 'session.created', 'session.updated']:
+                        logger.info(f"   Details: {json.dumps(data, indent=2)[:500]}")
+            
             # Log evenimente importante
             if event_type in LOG_EVENT_TYPES:
                 if event_type == "error":
-                    logger.error(f"❌ OpenAI Error: {data.get('error', {})}")
+                    logger.error(f"❌ OpenAI Error: {json.dumps(data.get('error', {}), indent=2)}")
+                elif event_type == "session.created":
+                    logger.info(f"✅ Sesiune creată: {data.get('session', {}).get('id', 'N/A')}")
+                elif event_type == "session.updated":
+                    session = data.get('session', {})
+                    logger.info(f"✅ Sesiune actualizată:")
+                    logger.info(f"   - input_audio_format: {session.get('input_audio_format')}")
+                    logger.info(f"   - output_audio_format: {session.get('output_audio_format')}")
+                    logger.info(f"   - voice: {session.get('voice')}")
                 elif event_type == "input_audio_buffer.speech_started":
                     logger.info("🎤 Utilizator vorbește...")
                 elif event_type == "input_audio_buffer.speech_stopped":
                     logger.info("🔇 Utilizator a terminat")
+                elif event_type == "response.created":
+                    logger.info("🤖 Generare răspuns început...")
                 elif event_type == "response.done":
-                    logger.info("✅ Răspuns complet")
+                    logger.info(f"✅ Răspuns complet - audio chunks trimise: {audio_chunks_received}")
+                elif event_type == "conversation.item.input_audio_transcription.completed":
+                    transcript = data.get('transcript', '')
+                    logger.info(f"📝 Transcriere: {transcript[:100]}")
             
             # Forward audio de la OpenAI la Twilio
             if event_type == "response.audio.delta":
@@ -282,9 +329,11 @@ async def handle_openai_messages(openai_ws, twilio_ws, get_stream_sid):
                             }
                         }
                         await twilio_ws.send_json(media_message)
+                    else:
+                        logger.warning("⚠️ Audio primit dar stream_sid lipsește!")
                         
-    except websockets.exceptions.ConnectionClosed:
-        logger.info("🔌 OpenAI WebSocket închis")
+    except websockets.exceptions.ConnectionClosed as e:
+        logger.info(f"🔌 OpenAI WebSocket închis: {e.code} - {e.reason}")
     except Exception as e:
         logger.error(f"❌ Eroare OpenAI handler: {e}")
 
