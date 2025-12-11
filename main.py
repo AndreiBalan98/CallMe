@@ -1,5 +1,5 @@
 """
-CallMe - Voice Assistant cu OpenAI Realtime API + Twilio Media Streams
+CallMe - Voice Assistant cu ElevenLabs Conversational AI + Twilio Media Streams
 Comunicare bidirecțională în timp real prin WebSockets
 """
 
@@ -8,6 +8,7 @@ import json
 import base64
 import asyncio
 import logging
+import aiohttp
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
@@ -26,64 +27,59 @@ logger = logging.getLogger(__name__)
 logging.getLogger("websockets").setLevel(logging.WARNING)
 
 # Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID")
 PORT = int(os.getenv("PORT", 5050))
 
-# OpenAI Realtime API settings
-# Modele disponibile:
-# - gpt-4o-realtime-preview (ultima versiune preview)
-# - gpt-realtime (GA - general availability, recomandat pentru producție)
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
-VOICE = "shimmer"  # Voci: alloy, ash, ballad, coral, echo, sage, shimmer, verse
-
-# System prompt pentru asistentul vocal
-SYSTEM_PROMPT = """Ești un asistent vocal prietenos care vorbește în limba română.
-
-Reguli importante:
-- Răspunde SCURT și NATURAL, ca într-o conversație telefonică normală
-- Evită răspunsurile lungi - maxim 2-3 propoziții
-- Fii cald și prietenos, dar concis
-- Nu repeta informații deja spuse
-- Când utilizatorul vrea să încheie (spune "pa", "la revedere", "gata", etc.), răspunde scurt cu un salut și conversația se va încheia automat
-- Nu menționa că ești o inteligență artificială decât dacă ești întrebat direct"""
-
-# Mesaje audio de început (vor fi generate și trimise la începutul apelului)
-GREETING_MESSAGES = [
-    "Bună! Cu ce te pot ajuta?",
-]
-
-# Evenimente OpenAI pe care le logăm (TOATE pentru debugging)
-LOG_EVENT_TYPES = [
-    'error',
-    'session.created',
-    'session.updated',
-    'response.created',
-    'response.done',
-    'response.audio.delta',
-    'response.audio.done',
-    'response.text.delta',
-    'response.text.done',
-    'input_audio_buffer.speech_started',
-    'input_audio_buffer.speech_stopped',
-    'input_audio_buffer.committed',
-    'conversation.item.created',
-    'conversation.item.input_audio_transcription.completed',
-    'rate_limits.updated',
-]
-
-# Flag pentru debugging - pune True pentru a vedea TOATE mesajele
-DEBUG_ALL_EVENTS = True
+# Flag pentru debugging
+DEBUG_ALL_EVENTS = os.getenv("DEBUG", "false").lower() == "true"
 
 app = FastAPI()
 
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY lipsește din .env")
+if not ELEVENLABS_API_KEY:
+    raise ValueError("ELEVENLABS_API_KEY lipsește din .env")
+if not ELEVENLABS_AGENT_ID:
+    raise ValueError("ELEVENLABS_AGENT_ID lipsește din .env")
+
+
+async def get_elevenlabs_ws_url() -> str:
+    """
+    Obține URL-ul WebSocket pentru ElevenLabs.
+    Încearcă mai întâi signed URL (pentru agenți privați),
+    dacă eșuează, folosește conexiune directă (pentru agenți publici).
+    """
+    # Încearcă să obții signed URL pentru agent privat
+    if ELEVENLABS_API_KEY:
+        try:
+            url = f"https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={ELEVENLABS_AGENT_ID}"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers={"xi-api-key": ELEVENLABS_API_KEY}
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        logger.info("🔐 Folosesc signed URL (agent privat)")
+                        return data["signed_url"]
+                    else:
+                        error_text = await response.text()
+                        logger.warning(f"⚠️ Nu pot obține signed URL: {response.status} - {error_text}")
+                        logger.info("📢 Încerc conexiune directă (agent public)...")
+        except Exception as e:
+            logger.warning(f"⚠️ Eroare la signed URL: {e}")
+            logger.info("📢 Încerc conexiune directă (agent public)...")
+    
+    # Fallback: conexiune directă pentru agent public
+    direct_url = f"wss://api.elevenlabs.io/v1/convai/conversation?agent_id={ELEVENLABS_AGENT_ID}"
+    logger.info("🌐 Folosesc conexiune directă (agent public)")
+    return direct_url
 
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Health check endpoint"""
-    return HTMLResponse(content="<h1>CallMe Voice Assistant - Running</h1>")
+    return HTMLResponse(content="<h1>CallMe Voice Assistant - ElevenLabs - Running</h1>")
 
 
 @app.api_route("/incoming-call", methods=["GET", "POST"])
@@ -95,8 +91,7 @@ async def incoming_call(request: Request):
     host = request.url.hostname
     port_suffix = f":{request.url.port}" if request.url.port and request.url.port not in (80, 443) else ""
     
-    # TwiML: conectează direct la WebSocket, fără mesaj Say
-    # (vom trimite audio-ul de salut prin stream)
+    # TwiML: conectează direct la WebSocket pentru Media Streams
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
@@ -112,13 +107,13 @@ async def incoming_call(request: Request):
 async def media_stream(websocket: WebSocket):
     """
     WebSocket endpoint pentru Twilio Media Streams.
-    Face proxy bidirecțional între Twilio și OpenAI Realtime API.
+    Face proxy bidirecțional între Twilio și ElevenLabs Conversational AI.
     """
     await websocket.accept()
     logger.info("🔌 Twilio WebSocket conectat")
     
     stream_sid = None
-    openai_ws = None
+    elevenlabs_ws = None
     
     try:
         # Variabilă pentru stream_sid (closure workaround)
@@ -126,37 +121,36 @@ async def media_stream(websocket: WebSocket):
             nonlocal stream_sid
             stream_sid = sid
         
-        # Conectare la OpenAI Realtime API
-        logger.info(f"🔄 Conectare la OpenAI: {OPENAI_REALTIME_URL}")
+        # Obține URL WebSocket pentru ElevenLabs
+        logger.info("🔑 Pregătire conexiune ElevenLabs...")
         try:
-            openai_ws = await websockets.connect(
-                OPENAI_REALTIME_URL,
-                extra_headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "OpenAI-Beta": "realtime=v1"
-                }
-            )
-            logger.info("🤖 Conectat la OpenAI Realtime API")
+            elevenlabs_url = await get_elevenlabs_ws_url()
         except Exception as e:
-            logger.error(f"❌ EROARE CONEXIUNE OPENAI: {e}")
-            logger.error(f"   Verifică: 1) API key valid 2) Acces la Realtime API 3) Model disponibil")
+            logger.error(f"❌ EROARE la obținerea URL-ului: {e}")
             await websocket.close()
             return
         
-        # Configurare sesiune OpenAI
-        await send_session_config(openai_ws)
+        # Conectare la ElevenLabs Conversational AI
+        logger.info("🔄 Conectare la ElevenLabs Conversational AI...")
+        try:
+            elevenlabs_ws = await websockets.connect(elevenlabs_url)
+            logger.info("🤖 Conectat la ElevenLabs Conversational AI")
+        except Exception as e:
+            logger.error(f"❌ EROARE CONEXIUNE ELEVENLABS: {e}")
+            await websocket.close()
+            return
         
         # Pornește task-uri paralele pentru comunicare bidirecțională
         receive_from_twilio = asyncio.create_task(
-            handle_twilio_messages(websocket, openai_ws, lambda: stream_sid, set_stream_sid)
+            handle_twilio_messages(websocket, elevenlabs_ws, lambda: stream_sid, set_stream_sid)
         )
-        receive_from_openai = asyncio.create_task(
-            handle_openai_messages(openai_ws, websocket, lambda: stream_sid)
+        receive_from_elevenlabs = asyncio.create_task(
+            handle_elevenlabs_messages(elevenlabs_ws, websocket, lambda: stream_sid)
         )
         
         # Așteaptă până când unul dintre task-uri se termină
         done, pending = await asyncio.wait(
-            [receive_from_twilio, receive_from_openai],
+            [receive_from_twilio, receive_from_elevenlabs],
             return_when=asyncio.FIRST_COMPLETED
         )
         
@@ -169,73 +163,17 @@ async def media_stream(websocket: WebSocket):
     except Exception as e:
         logger.error(f"❌ Eroare: {e}")
     finally:
-        if openai_ws:
-            await openai_ws.close()
-            logger.info("🔌 OpenAI WebSocket închis")
+        if elevenlabs_ws:
+            await elevenlabs_ws.close()
+            logger.info("🔌 ElevenLabs WebSocket închis")
 
 
-async def send_session_config(openai_ws):
-    """Trimite configurația sesiunii la OpenAI"""
-    session_config = {
-        "type": "session.update",
-        "session": {
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500
-            },
-            "input_audio_format": "g711_ulaw",
-            "output_audio_format": "g711_ulaw",
-            "voice": VOICE,
-            "instructions": SYSTEM_PROMPT,
-            "modalities": ["text", "audio"],
-            "temperature": 0.8,
-        }
-    }
-    logger.info(f"📤 Trimit session.update: input={session_config['session']['input_audio_format']}, output={session_config['session']['output_audio_format']}")
-    await openai_ws.send(json.dumps(session_config))
-    logger.info(f"⚙️ Session config trimis - voce: {VOICE}")
-
-
-async def send_initial_greeting(openai_ws):
+async def handle_twilio_messages(twilio_ws, elevenlabs_ws, get_stream_sid, set_stream_sid):
     """
-    Trimite mesajul de salut inițial prin OpenAI.
-    Folosim response.create pentru a genera audio-ul de salut.
+    Primește mesaje de la Twilio și le trimite la ElevenLabs.
+    Twilio trimite audio în format μ-law 8kHz base64.
     """
-    # Creăm un item de conversație cu salutul
-    greeting_event = {
-        "type": "conversation.item.create",
-        "item": {
-            "type": "message",
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": "Salută utilizatorul scurt și întreabă cu ce îl poți ajuta."
-                }
-            ]
-        }
-    }
-    await openai_ws.send(json.dumps(greeting_event))
-    logger.info("📤 Trimis conversation.item.create pentru salut")
-    
-    # Solicită răspuns CU AUDIO EXPLICIT
-    response_event = {
-        "type": "response.create",
-        "response": {
-            "modalities": ["text", "audio"]
-        }
-    }
-    await openai_ws.send(json.dumps(response_event))
-    logger.info("👋 Salut inițial solicitat cu modalities: text, audio")
-
-
-async def handle_twilio_messages(twilio_ws, openai_ws, get_stream_sid, set_stream_sid):
-    """
-    Primește mesaje de la Twilio și le trimite la OpenAI.
-    """
-    greeting_sent = False
+    conversation_started = False
     
     try:
         while True:
@@ -249,21 +187,28 @@ async def handle_twilio_messages(twilio_ws, openai_ws, get_stream_sid, set_strea
             elif event_type == "start":
                 stream_sid = data["start"]["streamSid"]
                 set_stream_sid(stream_sid)
-                logger.info(f"🎙️ Stream început - SID: {stream_sid[:20]}...")
+                call_sid = data["start"].get("callSid", "N/A")
+                logger.info(f"🎙️ Stream început - SID: {stream_sid[:20]}... CallSID: {call_sid[:15]}...")
                 
-                # Trimite salutul inițial după ce stream-ul a pornit
-                if not greeting_sent:
-                    await send_initial_greeting(openai_ws)
-                    greeting_sent = True
+                # Trimite inițializare conversație către ElevenLabs
+                # IMPORTANT: Formatul audio trebuie configurat în ElevenLabs Dashboard!
+                if not conversation_started:
+                    init_message = {
+                        "type": "conversation_initiation_client_data"
+                    }
+                    await elevenlabs_ws.send(json.dumps(init_message))
+                    logger.info("📤 Inițializare conversație trimisă")
+                    conversation_started = True
                 
             elif event_type == "media":
-                # Forward audio de la Twilio la OpenAI
+                # Forward audio de la Twilio la ElevenLabs
+                # Twilio trimite audio μ-law 8kHz base64, ElevenLabs îl acceptă direct
                 audio_payload = data["media"]["payload"]
-                audio_event = {
-                    "type": "input_audio_buffer.append",
-                    "audio": audio_payload
+                
+                audio_message = {
+                    "user_audio_chunk": audio_payload
                 }
-                await openai_ws.send(json.dumps(audio_event))
+                await elevenlabs_ws.send(json.dumps(audio_message))
                 
             elif event_type == "stop":
                 logger.info("🛑 Stream oprit de Twilio")
@@ -275,100 +220,117 @@ async def handle_twilio_messages(twilio_ws, openai_ws, get_stream_sid, set_strea
         logger.error(f"❌ Eroare Twilio handler: {e}")
 
 
-async def handle_openai_messages(openai_ws, twilio_ws, get_stream_sid):
+async def handle_elevenlabs_messages(elevenlabs_ws, twilio_ws, get_stream_sid):
     """
-    Primește mesaje de la OpenAI și le trimite la Twilio.
+    Primește mesaje de la ElevenLabs și le trimite la Twilio.
+    ElevenLabs trimite audio și evenimente conversaționale.
     """
-    audio_chunks_received = 0
+    audio_chunks_sent = 0
     
     try:
-        async for message in openai_ws:
+        async for message in elevenlabs_ws:
             data = json.loads(message)
             event_type = data.get("type", "")
             
-            # DEBUG: Log toate evenimentele
-            if DEBUG_ALL_EVENTS:
-                if event_type == "response.audio.delta":
-                    audio_chunks_received += 1
-                    if audio_chunks_received % 50 == 1:  # Log fiecare 50 chunks
-                        logger.info(f"🔊 Audio chunks primite: {audio_chunks_received}")
-                else:
-                    # Log complet pentru non-audio events
-                    logger.info(f"📨 OpenAI Event: {event_type}")
-                    if event_type in ['error', 'session.created', 'session.updated']:
-                        logger.info(f"   Details: {json.dumps(data, indent=2)[:500]}")
-            
-            # Log evenimente importante
-            if event_type in LOG_EVENT_TYPES:
-                if event_type == "error":
-                    logger.error(f"❌ OpenAI Error: {json.dumps(data.get('error', {}), indent=2)}")
-                elif event_type == "session.created":
-                    logger.info(f"✅ Sesiune creată: {data.get('session', {}).get('id', 'N/A')}")
-                elif event_type == "session.updated":
-                    session = data.get('session', {})
-                    logger.info(f"✅ Sesiune actualizată:")
-                    logger.info(f"   - modalities: {session.get('modalities')}")
-                    logger.info(f"   - input_audio_format: {session.get('input_audio_format')}")
-                    logger.info(f"   - output_audio_format: {session.get('output_audio_format')}")
-                    logger.info(f"   - voice: {session.get('voice')}")
-                    logger.info(f"   - turn_detection: {session.get('turn_detection', {}).get('type')}")
-                elif event_type == "input_audio_buffer.speech_started":
-                    logger.info("🎤 Utilizator vorbește...")
-                elif event_type == "input_audio_buffer.speech_stopped":
-                    logger.info("🔇 Utilizator a terminat")
-                elif event_type == "response.created":
-                    logger.info("🤖 Generare răspuns început...")
-                elif event_type == "response.done":
-                    response_data = data.get('response', {})
-                    output = response_data.get('output', [])
-                    status = response_data.get('status')
-                    logger.info(f"✅ Răspuns complet - audio chunks trimise: {audio_chunks_received}")
-                    logger.info(f"   Response status: {status}")
-                    
-                    # Dacă a eșuat, afișează motivul
-                    if status == 'failed':
-                        status_details = response_data.get('status_details', {})
-                        logger.error(f"   ❌ FAILED REASON: {status_details}")
-                        logger.error(f"   Full response: {json.dumps(response_data, indent=2)[:1000]}")
-                    
-                    logger.info(f"   Output items: {len(output)}")
-                    for i, item in enumerate(output):
-                        logger.info(f"   Item {i}: type={item.get('type')}, role={item.get('role')}")
-                        if item.get('content'):
-                            for c in item.get('content', []):
-                                logger.info(f"      Content: type={c.get('type')}, transcript={c.get('transcript', '')[:50] if c.get('transcript') else 'N/A'}")
-                elif event_type == "conversation.item.input_audio_transcription.completed":
-                    transcript = data.get('transcript', '')
-                    logger.info(f"📝 Transcriere: {transcript[:100]}")
-            
-            # Forward audio de la OpenAI la Twilio
-            if event_type == "response.audio.delta":
-                audio_payload = data.get("delta", "")
-                if audio_payload:
+            # Procesare evenimente ElevenLabs
+            if event_type == "conversation_initiation_metadata":
+                conversation_id = data.get("conversation_initiation_metadata_event", {}).get("conversation_id", "N/A")
+                logger.info(f"✅ Conversație inițiată - ID: {conversation_id}")
+                
+            elif event_type == "audio":
+                # Forward audio de la ElevenLabs la Twilio
+                audio_event = data.get("audio_event", {})
+                audio_base64 = audio_event.get("audio_base_64", "")
+                
+                if audio_base64:
                     stream_sid = get_stream_sid()
                     if stream_sid:
                         media_message = {
                             "event": "media",
                             "streamSid": stream_sid,
                             "media": {
-                                "payload": audio_payload
+                                "payload": audio_base64
                             }
                         }
                         await twilio_ws.send_json(media_message)
+                        audio_chunks_sent += 1
+                        
+                        if DEBUG_ALL_EVENTS and audio_chunks_sent % 50 == 1:
+                            logger.info(f"🔊 Audio chunks trimise: {audio_chunks_sent}")
                     else:
                         logger.warning("⚠️ Audio primit dar stream_sid lipsește!")
                         
+            elif event_type == "user_transcript":
+                # Transcrierea a ce spune utilizatorul
+                transcript_event = data.get("user_transcription_event", {})
+                transcript = transcript_event.get("user_transcript", "")
+                if transcript:
+                    logger.info(f"👤 Utilizator: {transcript}")
+                    
+            elif event_type == "agent_response":
+                # Răspunsul agentului (text)
+                response_event = data.get("agent_response_event", {})
+                response = response_event.get("agent_response", "")
+                if response:
+                    logger.info(f"🤖 Agent: {response}")
+                    
+            elif event_type == "agent_response_correction":
+                # Corecție la răspunsul agentului
+                correction_event = data.get("agent_response_correction_event", {})
+                corrected = correction_event.get("corrected_agent_response", "")
+                if corrected and DEBUG_ALL_EVENTS:
+                    logger.info(f"🔄 Agent (corectat): {corrected}")
+                    
+            elif event_type == "interruption":
+                # Utilizatorul a întrerupt agentul
+                logger.info("⚡ Utilizator a întrerupt agentul")
+                
+                # Trimite clear la Twilio pentru a opri audio-ul curent
+                stream_sid = get_stream_sid()
+                if stream_sid:
+                    clear_message = {
+                        "event": "clear",
+                        "streamSid": stream_sid
+                    }
+                    await twilio_ws.send_json(clear_message)
+                    logger.info("🔇 Buffer audio Twilio curățat")
+                    
+            elif event_type == "ping":
+                # Răspunde la ping pentru a menține conexiunea
+                ping_event = data.get("ping_event", {})
+                event_id = ping_event.get("event_id")
+                
+                pong_message = {
+                    "type": "pong",
+                    "event_id": event_id
+                }
+                await elevenlabs_ws.send(json.dumps(pong_message))
+                
+                if DEBUG_ALL_EVENTS:
+                    logger.info(f"🏓 Ping/Pong - event_id: {event_id}")
+                    
+            elif event_type == "error":
+                error_message = data.get("error", data.get("message", "Unknown error"))
+                logger.error(f"❌ ElevenLabs Error: {error_message}")
+                
+            elif DEBUG_ALL_EVENTS:
+                # Log alte evenimente pentru debugging
+                logger.info(f"📨 ElevenLabs Event: {event_type}")
+                        
     except websockets.exceptions.ConnectionClosed as e:
-        logger.info(f"🔌 OpenAI WebSocket închis: {e.code} - {e.reason}")
+        logger.info(f"🔌 ElevenLabs WebSocket închis: {e.code} - {e.reason}")
     except Exception as e:
-        logger.error(f"❌ Eroare OpenAI handler: {e}")
+        logger.error(f"❌ Eroare ElevenLabs handler: {e}")
+    finally:
+        logger.info(f"📊 Total audio chunks trimise: {audio_chunks_sent}")
 
 
 if __name__ == "__main__":
     import uvicorn
     logger.info("=" * 60)
-    logger.info("🚀 CallMe Voice Assistant - OpenAI Realtime")
-    logger.info(f"   Voice: {VOICE}")
+    logger.info("🚀 CallMe Voice Assistant - ElevenLabs Conversational AI")
+    logger.info(f"   Agent ID: {ELEVENLABS_AGENT_ID[:20]}...")
     logger.info(f"   Port: {PORT}")
+    logger.info(f"   Debug: {DEBUG_ALL_EVENTS}")
     logger.info("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=PORT)

@@ -1,11 +1,15 @@
 services:
   - type: web
-    name: callme-realtime
+    name: callme-elevenlabs
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: OPENAI_API_KEY
+      - key: ELEVENLABS_API_KEY
         sync: false
+      - key: ELEVENLABS_AGENT_ID
+        sync: false
+      - key: DEBUG
+        value: "false"
       - key: PYTHON_VERSION
         value: "3.11"
