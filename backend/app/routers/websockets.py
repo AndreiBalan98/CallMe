@@ -67,16 +67,20 @@ async def dashboard_websocket(websocket: WebSocket):
         receive_task = asyncio.create_task(_handle_dashboard_receive(websocket))
         send_task = asyncio.create_task(_handle_dashboard_send(websocket, queue))
         
+        # Wait for either task to complete (usually due to disconnect)
         done, pending = await asyncio.wait(
             [receive_task, send_task],
             return_when=asyncio.FIRST_COMPLETED
         )
         
+        # Cancel pending tasks gracefully
         for task in pending:
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
+                pass
+            except Exception:
                 pass
                 
     except WebSocketDisconnect:
@@ -92,20 +96,25 @@ async def _handle_dashboard_receive(websocket: WebSocket) -> None:
     """Handle incoming messages from dashboard."""
     try:
         while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            command = message.get("command", "")
-            
-            if command == "ping":
-                await websocket.send_json({
-                    "type": "pong",
-                    "data": {}
-                })
-            # Add more commands as needed
-            
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                
+                command = message.get("command", "")
+                
+                if command == "ping":
+                    await websocket.send_json({
+                        "type": "pong",
+                        "data": {}
+                    })
+                # Add more commands as needed
+                
+            except json.JSONDecodeError:
+                logger.warning("Received invalid JSON from dashboard")
+                
     except WebSocketDisconnect:
-        raise
+        # Normal disconnection, just exit the loop
+        logger.debug("Dashboard client disconnected (receive)")
     except Exception as e:
         logger.error(f"Error receiving dashboard message: {e}")
 
@@ -120,9 +129,17 @@ async def _handle_dashboard_send(websocket: WebSocket, queue: asyncio.Queue) -> 
             if event.get("type") == "shutdown":
                 break
             
-            await websocket.send_json(event)
+            try:
+                await websocket.send_json(event)
+            except Exception as e:
+                logger.debug(f"Failed to send event: {e}")
+                break
             
     except WebSocketDisconnect:
-        raise
+        # Normal disconnection, just exit
+        logger.debug("Dashboard client disconnected (send)")
+    except asyncio.CancelledError:
+        # Task was cancelled, normal during shutdown
+        pass
     except Exception as e:
         logger.error(f"Error sending dashboard event: {e}")
