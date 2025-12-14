@@ -1,0 +1,20 @@
+[
+  {
+    "id": "dr-popescu",
+    "name": "Dr. Maria Popescu",
+    "specialization": "Ortodonție",
+    "available_services": ["consultatie", "aparat-dentar", "gutiera", "control"]
+  },
+  {
+    "id": "dr-ionescu",
+    "name": "Dr. Andrei Ionescu",
+    "specialization": "Chirurgie dentară",
+    "available_services": ["consultatie", "extractie", "extractie-molar-minte", "implant", "control"]
+  },
+  {
+    "id": "dr-dumitrescu",
+    "name": "Dr. Elena Dumitrescu",
+    "specialization": "Stomatologie generală",
+    "available_services": ["consultatie", "detartraj", "tratament-carie", "albire", "control", "plomba"]
+  }
+]

@@ -1,0 +1,79 @@
+[
+  {
+    "id": "consultatie",
+    "name": "Consultație",
+    "price": 100,
+    "duration_minutes": 30,
+    "description": "Consultație și plan de tratament personalizat"
+  },
+  {
+    "id": "control",
+    "name": "Control periodic",
+    "price": 50,
+    "duration_minutes": 30,
+    "description": "Control de rutină pentru pacienți existenți"
+  },
+  {
+    "id": "detartraj",
+    "name": "Detartraj + Periaj profesional",
+    "price": 200,
+    "duration_minutes": 30,
+    "description": "Curățare profesională cu ultrasunete și periaj"
+  },
+  {
+    "id": "tratament-carie",
+    "name": "Tratament carie",
+    "price": 150,
+    "duration_minutes": 30,
+    "description": "Obturație compozit estetică"
+  },
+  {
+    "id": "plomba",
+    "name": "Plombă",
+    "price": 180,
+    "duration_minutes": 30,
+    "description": "Restaurare dentară cu material compozit"
+  },
+  {
+    "id": "albire",
+    "name": "Albire dentară",
+    "price": 800,
+    "duration_minutes": 60,
+    "description": "Albire profesională cu lampă LED"
+  },
+  {
+    "id": "extractie",
+    "name": "Extracție dentară simplă",
+    "price": 150,
+    "duration_minutes": 30,
+    "description": "Extracție dinte simplu"
+  },
+  {
+    "id": "extractie-molar-minte",
+    "name": "Extracție molar de minte",
+    "price": 400,
+    "duration_minutes": 60,
+    "description": "Extracție chirurgicală molar de minte"
+  },
+  {
+    "id": "implant",
+    "name": "Implant dentar",
+    "price": 2500,
+    "duration_minutes": 60,
+    "description": "Implant dentar premium cu garanție"
+  },
+  {
+    "id": "aparat-dentar",
+    "name": "Aparat dentar fix",
+    "price": 3500,
+    "duration_minutes": 60,
+    "description": "Consultație și montare aparat ortodontic"
+  },
+  {
+    "id": "gutiera",
+    "name": "Gutieră ortodontică",
+    "price": 1500,
+    "duration_minutes": 30,
+    "description": "Gutieră transparentă pentru aliniere"
+  }
+]

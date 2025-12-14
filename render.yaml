@@ -1,15 +1,51 @@
+# Render Blueprint for Dental Voice Assistant
+
 services:
+  # Backend API
   - type: web
-    name: callme-elevenlabs
+    name: dental-voice-backend
     runtime: python
+    rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: ELEVENLABS_API_KEY
+      - key: OPENAI_API_KEY
         sync: false
-      - key: ELEVENLABS_AGENT_ID
-        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-realtime-preview-2024-12-17
+      - key: OPENAI_VOICE
+        value: alloy
+      - key: ENVIRONMENT
+        value: production
       - key: DEBUG
         value: "false"
+      - key: CORS_ORIGINS
+        value: https://dental-voice-frontend.onrender.com
       - key: PYTHON_VERSION
         value: "3.11"
+    healthCheckPath: /health
+
+  # Frontend Static Site
+  - type: web
+    name: dental-voice-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: no-cache
+    routes:
+      - type: rewrite
+        source: /api/*
+        destination: https://dental-voice-backend.onrender.com/api/*
+      - type: rewrite
+        source: /ws/*
+        destination: https://dental-voice-backend.onrender.com/ws/*
+      - type: rewrite
+        source: /incoming-call
+        destination: https://dental-voice-backend.onrender.com/incoming-call
+      - type: rewrite
+        source: /media-stream
+        destination: https://dental-voice-backend.onrender.com/media-stream

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "apt-sample1",
+    "doctor_id": "dr-popescu",
+    "date": "2024-12-14",
+    "time": "09:00",
+    "patient_name": "Alexandru Marinescu",
+    "patient_phone": "+40722111222",
+    "service_id": "consultatie",
+    "created_at": "2024-12-13T14:30:00Z",
+    "created_by": "dashboard",
+    "status": "confirmed"
+  },
+  {
+    "id": "apt-sample2",
+    "doctor_id": "dr-ionescu",
+    "date": "2024-12-14",
+    "time": "10:00",
+    "patient_name": "Maria Georgescu",
+    "patient_phone": "+40733222333",
+    "service_id": "extractie",
+    "created_at": "2024-12-13T15:00:00Z",
+    "created_by": "ai-assistant",
+    "status": "confirmed"
+  },
+  {
+    "id": "apt-sample3",
+    "doctor_id": "dr-dumitrescu",
+    "date": "2024-12-14",
+    "time": "11:30",
+    "patient_name": "Ion Vasilescu",
+    "patient_phone": "+40744333444",
+    "service_id": "detartraj",
+    "created_at": "2024-12-13T16:00:00Z",
+    "created_by": "dashboard",
+    "status": "confirmed"
+  }
+]

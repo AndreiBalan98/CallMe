@@ -1,0 +1,15 @@
+{
+  "name": "Clinica Dentară SmilePro",
+  "phone": "+40 21 123 4567",
+  "address": "Strada Victoriei 45, Sector 1, București",
+  "greeting_templates": [
+    "Bună ziua, Clinica SmilePro, cu ce vă putem ajuta?",
+    "Clinica SmilePro, bună ziua! Cum vă putem fi de folos?",
+    "Bună ziua și bine ați sunat la SmilePro! Cu ce vă pot ajuta?"
+  ],
+  "working_hours": {
+    "start": "08:00",
+    "end": "18:00",
+    "slot_duration_minutes": 30
+  }
+}
